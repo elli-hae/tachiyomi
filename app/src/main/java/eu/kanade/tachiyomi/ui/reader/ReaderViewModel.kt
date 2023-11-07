@@ -40,6 +40,7 @@ import eu.kanade.tachiyomi.util.lang.byteSize
 import eu.kanade.tachiyomi.util.lang.takeBytes
 import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.cacheImageDir
+import eu.kanade.tachiyomi.util.system.isOnline
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -74,6 +75,7 @@ import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.source.local.isLocal
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.net.UnknownHostException
 import java.util.Date
 
 /**
@@ -97,6 +99,7 @@ class ReaderViewModel @JvmOverloads constructor(
     private val upsertHistory: UpsertHistory = Injekt.get(),
     private val updateChapter: UpdateChapter = Injekt.get(),
     private val setMangaViewerFlags: SetMangaViewerFlags = Injekt.get(),
+    private var _chapterList: List<ReaderChapter>? = null,
 ) : ViewModel() {
 
     private val mutableState = MutableStateFlow(State())
@@ -135,17 +138,29 @@ class ReaderViewModel @JvmOverloads constructor(
     private var loader: ChapterLoader? = null
 
     /**
+     * The list of chapters. It gets initialized lazily through the getter.
+     */
+    private val chapterList : List<ReaderChapter>
+        get() {
+            if (_chapterList == null) {
+                _chapterList = initChapterList()
+            }
+            return _chapterList!!
+        }
+
+    /**
      * The time the chapter was started reading
      */
     private var chapterReadStartTime: Long? = null
 
     private var chapterToDownload: Download? = null
 
+
     /**
-     * Chapter list for the active manga. It's retrieved lazily and should be accessed for the first
-     * time in a background thread to avoid blocking the UI.
+     * Function to retrieve Chapter list for the active manga. It gets retrieved lazily through the chapterList val and
+     * should be accessed for the first time in a background thread to avoid blocking the UI.
      */
-    private val chapterList by lazy {
+    private fun initChapterList() : List<ReaderChapter> {
         val manga = manga!!
         val chapters = runBlocking { getChaptersByMangaId.await(manga.id, applyScanlatorFilter = true) }
 
@@ -187,8 +202,7 @@ class ReaderViewModel @JvmOverloads constructor(
             }
             else -> chapters
         }
-
-        chaptersForReader
+        return chaptersForReader
             .sortedWith(getChapterSort(manga, sortDescending = false))
             .run {
                 if (readerPreferences.skipDupe().get()) {
@@ -337,6 +351,10 @@ class ReaderViewModel @JvmOverloads constructor(
                 if (e is CancellationException) {
                     throw e
                 }
+                val context = Injekt.get<Application>()
+                if (e is UnknownHostException && !context.isOnline()) {
+                    filterDownloadedChapterList()
+                }
                 logcat(LogPriority.ERROR, e)
             }
         }
@@ -359,7 +377,13 @@ class ReaderViewModel @JvmOverloads constructor(
             if (e is CancellationException) {
                 throw e
             }
-            logcat(LogPriority.ERROR, e)
+            val context = Injekt.get<Application>()
+            if (e is UnknownHostException && !context.isOnline()) {
+                filterDownloadedChapterList()
+                throw e
+            } else {
+                logcat(LogPriority.ERROR, e)
+            }
         } finally {
             mutableState.update { it.copy(isLoadingAdjacentChapter = false) }
         }
@@ -401,9 +425,46 @@ class ReaderViewModel @JvmOverloads constructor(
             if (e is CancellationException) {
                 throw e
             }
+            val context = Injekt.get<Application>()
+            if (e is UnknownHostException && !context.isOnline()) {
+                filterDownloadedChapterList()
+            }
             return
         }
         eventChannel.trySend(Event.ReloadViewerChapters)
+    }
+
+    /**
+     * Filters downloaded chapters in chapterList if device is offline and an error occurs when trying to load the next
+     * chapter.
+     * */
+    private suspend fun filterDownloadedChapterList() {
+        val currChapters = state.value.viewerChapters!!
+        val manga = manga!!
+        _chapterList = chapterList.filter { chapter ->
+            downloadManager.isChapterDownloaded(
+                chapter.chapter.name, chapter.chapter.scanlator, manga.title, manga.source
+            )
+        }
+        val newIndex = chapterList.indexOf(currChapters.currChapter)
+        val nextChapter = chapterList.getOrNull(newIndex + 1)
+        val prevChapter = chapterList.getOrNull(newIndex - 1)
+
+        val newViewerChapters = ViewerChapters(
+            currChapters.currChapter,
+            prevChapter,
+            nextChapter,
+        )
+
+        withUIContext {
+            mutableState.update {
+                // Add new references first to avoid unnecessary recycling
+                newViewerChapters.ref()
+                it.viewerChapters?.unref()
+                it.copy(viewerChapters = newViewerChapters)
+            }
+        }
+        eventChannel.send(Event.ReloadViewerChapters)
     }
 
     fun onViewerLoaded(viewer: Viewer?) {
@@ -569,7 +630,13 @@ class ReaderViewModel @JvmOverloads constructor(
      */
     suspend fun loadNextChapter() {
         val nextChapter = state.value.viewerChapters?.nextChapter ?: return
-        loadAdjacent(nextChapter)
+        try {
+            loadAdjacent(nextChapter)
+        } catch (e: UnknownHostException) {
+            if (nextChapter != state.value.viewerChapters?.nextChapter) {
+                loadNextChapter()
+            }
+        }
     }
 
     /**
@@ -577,7 +644,13 @@ class ReaderViewModel @JvmOverloads constructor(
      */
     suspend fun loadPreviousChapter() {
         val prevChapter = state.value.viewerChapters?.prevChapter ?: return
-        loadAdjacent(prevChapter)
+        try {
+            loadAdjacent(prevChapter)
+        } catch (e: UnknownHostException) {
+            if (prevChapter != state.value.viewerChapters?.prevChapter) {
+                loadPreviousChapter()
+            }
+        }
     }
 
     /**
