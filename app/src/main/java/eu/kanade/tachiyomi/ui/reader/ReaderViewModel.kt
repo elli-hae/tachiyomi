@@ -140,7 +140,7 @@ class ReaderViewModel @JvmOverloads constructor(
     /**
      * The list of chapters. It gets initialized lazily through the getter.
      */
-    private val chapterList : List<ReaderChapter>
+    private val chapterList: List<ReaderChapter>
         get() {
             if (_chapterList == null) {
                 _chapterList = initChapterList()
@@ -155,12 +155,11 @@ class ReaderViewModel @JvmOverloads constructor(
 
     private var chapterToDownload: Download? = null
 
-
     /**
      * Function to retrieve Chapter list for the active manga. It gets retrieved lazily through the chapterList val and
      * should be accessed for the first time in a background thread to avoid blocking the UI.
      */
-    private fun initChapterList() : List<ReaderChapter> {
+    private fun initChapterList(): List<ReaderChapter> {
         val manga = manga!!
         val chapters = runBlocking { getChaptersByMangaId.await(manga.id, applyScanlatorFilter = true) }
 
@@ -443,7 +442,7 @@ class ReaderViewModel @JvmOverloads constructor(
         val manga = manga!!
         _chapterList = chapterList.filter { chapter ->
             downloadManager.isChapterDownloaded(
-                chapter.chapter.name, chapter.chapter.scanlator, manga.title, manga.source
+                chapter.chapter.name, chapter.chapter.scanlator, manga.title, manga.source,
             )
         }
         val newIndex = chapterList.indexOf(currChapters.currChapter)
